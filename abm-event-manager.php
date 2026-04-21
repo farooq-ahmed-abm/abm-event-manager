@@ -959,9 +959,13 @@ function abmClearForm() {
   document.getElementById('abm-cat').value = '';
   document.getElementById('abm-stat').value = 'publish';
   document.getElementById('abm-ai').value = '';
-  if(ev.recurrence){document.getElementById('abm-recurrence').value=ev.recurrence;abmToggleRecurrence();}
-  if(ev.recurrence_every){document.getElementById('abm-rec-every').value=ev.recurrence_every;}
-  if(ev.recurrence_end){document.getElementById('abm-rec-end').value=ev.recurrence_end.split(' ')[0];}
+  const _rec = document.getElementById('abm-recurrence');
+  if (_rec) { _rec.value = 'none'; }
+  const _recEvery = document.getElementById('abm-rec-every');
+  if (_recEvery) { _recEvery.value = '7'; }
+  const _recEnd = document.getElementById('abm-rec-end');
+  if (_recEnd) { _recEnd.value = ''; }
+  abmToggleRecurrence();
   abmClearImg();
 }
 
@@ -1136,11 +1140,13 @@ async function abmConfirmDel() {
 
 // ── Toast ─────────────────────────────────────────────────────────────────
 function abmToggleRecurrence() {
-  const val = document.getElementById('abm-recurrence').value;
+  const sel = document.getElementById('abm-recurrence');
+  if (!sel) return;
+  const val = sel.value;
   const everyWrap = document.getElementById('abm-rec-every-wrap');
   const endWrap   = document.getElementById('abm-rec-end-wrap');
-  everyWrap.style.display = val === 'custom' ? '' : 'none';
-  endWrap.style.display   = val !== 'none' ? '' : 'none';
+  if (everyWrap) everyWrap.style.display = val === 'custom' ? '' : 'none';
+  if (endWrap)   endWrap.style.display   = val !== 'none' ? '' : 'none';
 }
 
 function abmToast(msg, type = 'ok') {
