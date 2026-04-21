@@ -3,7 +3,7 @@
  * Plugin Name: ABM Event Manager
  * Plugin URI:  https://abmreading.org
  * Description: Internal event management tool for Abu Bakr Masjid administrators. Adds a private admin page with a full event creation, editing, deletion and image upload interface.
- * Version:     1.2.0
+ * Version:     1.2.1
  * Author:      Abu Bakr Masjid
  * License:     Private
  */
@@ -592,6 +592,8 @@ class ABM_Event_Manager {
         return rest_ensure_response( $parent );
     }
 
+
+
     /* ── Admin page HTML ────────────────────────────────────────────────── */
     public function render_admin_page() {
         if ( ! current_user_can( 'edit_posts' ) ) {
@@ -659,10 +661,7 @@ class ABM_Event_Manager {
 .fi:focus,.ft:focus,.fs:focus{outline:none;border-color:var(--green);box-shadow:0 0 0 3px rgba(27,122,94,.1);}
 .ft{resize:vertical;min-height:80px;line-height:1.5;}
 .frow{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-.ai-box{background:linear-gradient(135deg,#e8eef5,#fdf6e3);border:1px solid #b8c8d8;border-radius:9px;padding:.85rem 1rem;margin-bottom:1.1rem;}
-.ai-lbl{font-size:11px;font-weight:600;color:var(--green);margin-bottom:7px;}
-.ai-row{display:flex;gap:8px;}
-.ai-row input{flex:1;padding:7px 10px;border:1px solid #B8DDD2;border-radius:6px;font-size:13px;font-family:inherit;background:#fff;}
+
 .dz{border:2px dashed var(--border);border-radius:9px;padding:2rem 1rem;text-align:center;cursor:pointer;transition:all .15s;background:#FAFAF8;}
 .dz:hover,.dz.drag{border-color:var(--green);background:var(--green-light);}
 .dz .di{font-size:32px;margin-bottom:6px;}
@@ -721,13 +720,7 @@ class ABM_Event_Manager {
         <button class="abm-tab" onclick="abmTab('image')" id="abm-ti">Image <span id="abm-ic"></span></button>
       </div>
       <div id="abm-tdetails">
-        <div class="ai-box">
-          <div class="ai-lbl">✨ AI Assist — describe the event in plain English</div>
-          <div class="ai-row">
-            <input id="abm-ai" type="text" placeholder='e.g. "Sisters Quran circle every Sunday 10am in the main hall"' onkeydown="if(event.key==='Enter')abmAI()"/>
-            <button class="abmbtn abmbtn-p abmbtn-sm" onclick="abmAI()" id="abm-aibtn">Fill ↗</button>
-          </div>
-        </div>
+
         <div class="fg"><label class="fl">Event title *</label><input class="fi" id="abm-title" placeholder="e.g. Friday Jummah Prayer"/></div>
         <div class="frow">
           <div class="fg"><label class="fl">Start date</label><input type="date" class="fi" id="abm-date"/></div>
@@ -958,7 +951,6 @@ function abmClearForm() {
   ['abm-title','abm-date','abm-time','abm-edate','abm-etime','abm-loc','abm-desc'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('abm-cat').value = '';
   document.getElementById('abm-stat').value = 'publish';
-  document.getElementById('abm-ai').value = '';
   const _rec = document.getElementById('abm-recurrence');
   if (_rec) { _rec.value = 'none'; }
   const _recEvery = document.getElementById('abm-rec-every');
@@ -999,37 +991,6 @@ function abmTab(t) {
     document.getElementById('abm-t' + n).classList.toggle('abm-hidden', n !== t);
     document.getElementById('abm-t' + n.charAt(0)).classList.toggle('on', n === t);
   });
-}
-
-// ── AI Assist ─────────────────────────────────────────────────────────────
-async function abmAI() {
-  const p = document.getElementById('abm-ai').value.trim();
-  if (!p) return;
-  const btn = document.getElementById('abm-aibtn');
-  btn.innerHTML = '<span class="spin"></span>'; btn.disabled = true;
-  try {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514', max_tokens: 800,
-        system: 'Assistant for Abu Bakr Masjid Reading UK. Extract event info and return ONLY raw JSON: {title,date(YYYY-MM-DD),time(HH:MM),endDate,endTime,location,description(2-3 sentences),category(Prayer|Education|Community|Youth|Sisters|Fundraising|Lecture|Other)}. No markdown.',
-        messages: [{ role: 'user', content: p }]
-      })
-    });
-    const d = await r.json();
-    const text = (d.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-    const x = JSON.parse(text.replace(/```json|```/g, '').trim());
-    if (x.title) document.getElementById('abm-title').value = x.title;
-    if (x.date) document.getElementById('abm-date').value = x.date;
-    if (x.time) document.getElementById('abm-time').value = x.time;
-    if (x.endDate) document.getElementById('abm-edate').value = x.endDate;
-    if (x.endTime) document.getElementById('abm-etime').value = x.endTime;
-    if (x.location) document.getElementById('abm-loc').value = x.location;
-    if (x.description) document.getElementById('abm-desc').value = x.description;
-    if (x.category) document.getElementById('abm-cat').value = x.category;
-    abmToast('AI filled in event details ✓');
-  } catch (e) { abmToast('AI assist unavailable — fill in manually', 'warn'); }
-  btn.innerHTML = 'Fill ↗'; btn.disabled = false;
 }
 
 // ── Image upload (via WP AJAX — no separate credentials needed!) ──────────
