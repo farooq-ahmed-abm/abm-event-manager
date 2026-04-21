@@ -1547,17 +1547,8 @@ class ABM_GitHub_Updater {
         $latest_version  = ltrim( $release->tag_name, 'v' );
         $current_version = $this->get_plugin_data()['Version'];
         if ( version_compare( $latest_version, $current_version, '>' ) ) {
-            $download_url = '';
-            foreach ( $release->assets as $asset ) {
-                if ( strpos( $asset->name, '.zip' ) !== false ) {
-                    $download_url = $asset->browser_download_url;
-                    break;
-                }
-            }
-            if ( ! $download_url ) {
-                // Fall back to zip download of tag
-                $download_url = 'https://github.com/' . $this->repo . '/archive/refs/tags/' . $release->tag_name . '.zip';
-            }
+            // Use zipball_url for private repos (authenticated download)
+            $download_url = isset( $release->zipball_url ) ? $release->zipball_url : 'https://api.github.com/repos/' . $this->repo . '/zipball/' . $release->tag_name;
             $transient->response[ $this->slug ] = (object) array(
                 'slug'        => dirname( $this->slug ),
                 'plugin'      => $this->slug,
@@ -1581,13 +1572,7 @@ class ABM_GitHub_Updater {
             return $result;
         }
         $data = $this->get_plugin_data();
-        $download_url = 'https://github.com/' . $this->repo . '/archive/refs/tags/' . $release->tag_name . '.zip';
-        foreach ( $release->assets as $asset ) {
-            if ( strpos( $asset->name, '.zip' ) !== false ) {
-                $download_url = $asset->browser_download_url;
-                break;
-            }
-        }
+        $download_url = isset( $release->zipball_url ) ? $release->zipball_url : 'https://api.github.com/repos/' . $this->repo . '/zipball/' . $release->tag_name;
         return (object) array(
             'name'          => $data['Name'],
             'slug'          => dirname( $this->slug ),
