@@ -3,7 +3,7 @@
  * Plugin Name: ABM Event Manager
  * Plugin URI:  https://abmreading.org
  * Description: Internal event management tool for Abu Bakr Masjid administrators. Adds a private admin page with a full event creation, editing, deletion and image upload interface.
- * Version:     1.1.0
+ * Version:     1.2.0
  * Author:      Abu Bakr Masjid
  * License:     Private
  */
@@ -23,6 +23,7 @@ class ABM_Event_Manager {
         add_action( 'plugins_loaded', [ $this, 'create_table' ] );
         register_activation_hook( __FILE__, [ $this, 'create_table' ] );
         add_action( 'rest_api_init', array( $this, 'register_rest_routes' ) );
+        add_action( 'wp_ajax_abm_delete_series', array( $this, 'ajax_delete_series' ) );
         add_shortcode( 'abm_events', [ $this, 'render_shortcode' ] );
         add_action( 'wp_head', [ $this, 'shortcode_styles' ] );
         add_filter( 'single_template', array( $this, 'event_detail_template' ) );
@@ -48,6 +49,10 @@ class ABM_Event_Manager {
   image_url varchar(500) DEFAULT '',
   image_id bigint(20) DEFAULT NULL,
   wp_post_id bigint(20) DEFAULT NULL,
+  recurrence varchar(20) DEFAULT 'none',
+  recurrence_every int(11) DEFAULT NULL,
+  recurrence_end date DEFAULT NULL,
+  parent_event_id bigint(20) DEFAULT NULL,
   created_at datetime DEFAULT NULL,
   updated_at datetime DEFAULT NULL,
   PRIMARY KEY  (id)
@@ -113,7 +118,10 @@ class ABM_Event_Manager {
         $status      = sanitize_text_field( $_POST['status'] ?? 'publish' );
         $description = sanitize_textarea_field( $_POST['description'] ?? '' );
         $image_url   = esc_url_raw( $_POST['image_url'] ?? '' );
-        $image_id    = intval( $_POST['image_id'] ?? 0 );
+        $image_id         = intval( $_POST['image_id'] ?? 0 );
+        $recurrence       = sanitize_text_field( $_POST['recurrence'] ?? 'none' );
+        $recurrence_every = intval( $_POST['recurrence_every'] ?? 0 );
+        $recurrence_end   = sanitize_text_field( $_POST['recurrence_end'] ?? '' );
 
         if ( empty( $title ) ) {
             wp_send_json_error( 'Title is required' );
@@ -173,7 +181,11 @@ class ABM_Event_Manager {
             $data['wp_post_id'] = is_wp_error( $post_id ) ? null : $post_id;
             $data['created_at']  = $now;
             $wpdb->insert( $table, $data );
-            wp_send_json_success( [ 'id' => $wpdb->insert_id, 'wp_post_id' => $data['wp_post_id'], 'action' => 'created' ] );
+            $new_id = $wpdb->insert_id;
+            if ( 'none' !== $recurrence && ! empty( $event_date ) ) {
+                $this->generate_occurrences( $new_id, $data, $recurrence, $recurrence_every, $recurrence_end );
+            }
+            wp_send_json_success( [ 'id' => $new_id, 'wp_post_id' => $data['wp_post_id'], 'action' => 'created' ] );
         }
     }
 
@@ -290,6 +302,13 @@ class ABM_Event_Manager {
             array(
                 'methods'             => 'DELETE',
                 'callback'            => array( $this, 'rest_delete_event' ),
+                'permission_callback' => array( $this, 'rest_permission' ),
+            ),
+        ) );
+        register_rest_route( 'abm/v1', '/events/recurring', array(
+            array(
+                'methods'             => 'POST',
+                'callback'            => array( $this, 'rest_create_recurring_event' ),
                 'permission_callback' => array( $this, 'rest_permission' ),
             ),
         ) );
@@ -447,6 +466,130 @@ class ABM_Event_Manager {
         }
         $wpdb->delete( $table, array( 'id' => $id ) );
         return rest_ensure_response( array( 'deleted' => true, 'id' => $id ) );
+    }
+
+
+    /* ── Generate recurring occurrences ────────────────────────────────── */
+    private function generate_occurrences( $parent_id, $data, $recurrence, $every, $end_date ) {
+        global $wpdb;
+        $table     = $wpdb->prefix . 'abm_events';
+        $start     = new DateTime( $data['event_date'] );
+        $end_limit = $end_date ? new DateTime( $end_date ) : null;
+        $max       = 52; // safety cap
+        $count     = 0;
+
+        // Step interval in days
+        switch ( $recurrence ) {
+            case 'weekly':    $interval = 7;           break;
+            case 'biweekly':  $interval = 14;          break;
+            case 'monthly':   $interval = null;        break; // special handling
+            case 'custom':    $interval = max(1, intval( $every ) ); break;
+            default:          return;
+        }
+
+        $current = clone $start;
+
+        while ( $count < $max ) {
+            // Advance to next occurrence
+            if ( 'monthly' === $recurrence ) {
+                $current->modify( '+1 month' );
+            } else {
+                $current->modify( "+{$interval} days" );
+            }
+
+            // Stop if past end date
+            if ( $end_limit && $current > $end_limit ) {
+                break;
+            }
+
+            // Build occurrence data
+            $occ = $data;
+            $occ['event_date']      = $current->format( 'Y-m-d' );
+            $occ['parent_event_id'] = $parent_id;
+            $occ['created_at']      = current_time( 'mysql' );
+            $occ['updated_at']      = current_time( 'mysql' );
+            unset( $occ['recurrence'], $occ['recurrence_every'], $occ['recurrence_end'] );
+            $occ['recurrence']       = 'none'; // occurrences are not themselves recurring
+            $occ['recurrence_every'] = null;
+            $occ['recurrence_end']   = null;
+
+            // Create WP post for occurrence
+            $post_content  = '<p>' . esc_html( $occ['description'] ?? '' ) . '</p>';
+            $post_content .= '<p>' . esc_html( $occ['event_date'] ) . ' ' . esc_html( $occ['event_time'] ?? '' ) . '</p>';
+            $post_content .= '<p>' . esc_html( $occ['location'] ?? '' ) . '</p>';
+            $post_id = wp_insert_post( array(
+                'post_title'   => $occ['title'],
+                'post_content' => $post_content,
+                'post_status'  => $occ['status'],
+                'post_type'    => 'abm_event',
+                'post_excerpt' => mb_substr( $occ['description'] ?? '', 0, 120 ),
+            ) );
+            $occ['wp_post_id'] = is_wp_error( $post_id ) ? null : $post_id;
+
+            $wpdb->insert( $table, $occ );
+            $count++;
+
+            // If no end date, stop after a sensible default
+            if ( ! $end_limit && $count >= 12 ) {
+                break;
+            }
+        }
+    }
+
+    /* ── AJAX: Delete entire series ─────────────────────────────────────── */
+    public function ajax_delete_series() {
+        check_ajax_referer( 'abm_nonce', 'nonce' );
+        if ( ! current_user_can( 'edit_posts' ) ) wp_die( 'Unauthorized', 403 );
+        global $wpdb;
+        $table     = $wpdb->prefix . 'abm_events';
+        $parent_id = intval( $_POST['parent_id'] ?? 0 );
+        if ( ! $parent_id ) {
+            wp_send_json_error( 'No parent ID provided' );
+            return;
+        }
+        // Get all events in series (parent + children)
+        $series = $wpdb->get_results( $wpdb->prepare(
+            "SELECT id, wp_post_id FROM $table WHERE id = %d OR parent_event_id = %d",
+            $parent_id, $parent_id
+        ) );
+        foreach ( $series as $ev ) {
+            if ( $ev->wp_post_id ) {
+                wp_delete_post( $ev->wp_post_id, true );
+            }
+            $wpdb->delete( $table, array( 'id' => $ev->id ) );
+        }
+        wp_send_json_success( array( 'deleted_count' => count( $series ) ) );
+    }
+
+    /* ── REST: Create recurring event ───────────────────────────────────── */
+    public function rest_create_recurring_event( $request ) {
+        $params     = $request->get_json_params();
+        $recurrence = sanitize_text_field( $params['recurrence'] ?? 'none' );
+        $every      = intval( $params['recurrence_every'] ?? 0 );
+        $end_date   = sanitize_text_field( $params['recurrence_end'] ?? '' );
+
+        // Create parent event via existing method
+        $response = $this->rest_create_event( $request );
+        if ( is_wp_error( $response ) ) {
+            return $response;
+        }
+        $parent = $response->get_data();
+        $parent_id = $parent->id;
+
+        // Generate occurrences
+        global $wpdb;
+        $table = $wpdb->prefix . 'abm_events';
+        $data  = (array) $wpdb->get_row( $wpdb->prepare( "SELECT * FROM $table WHERE id = %d", $parent_id ) );
+        if ( 'none' !== $recurrence && ! empty( $data['event_date'] ) ) {
+            $this->generate_occurrences( $parent_id, $data, $recurrence, $every, $end_date );
+        }
+
+        // Return parent + count of occurrences
+        $occ_count = $wpdb->get_var( $wpdb->prepare(
+            "SELECT COUNT(*) FROM $table WHERE parent_event_id = %d", $parent_id
+        ) );
+        $parent->occurrences_created = intval( $occ_count );
+        return rest_ensure_response( $parent );
     }
 
     /* ── Admin page HTML ────────────────────────────────────────────────── */
@@ -613,6 +756,32 @@ class ABM_Event_Manager {
           </div>
         </div>
         <div class="fg"><label class="fl">Description</label><textarea class="ft" id="abm-desc" placeholder="Brief description of the event…"></textarea></div>
+        <div class="fg" style="background:#f5f5f0;border-radius:9px;padding:.9rem 1rem;border:1px solid var(--border);">
+          <label class="fl" style="margin-bottom:8px;">Recurrence</label>
+          <div class="frow" style="margin-bottom:.75rem;">
+            <div class="fg" style="margin-bottom:0">
+              <label class="fl">Pattern</label>
+              <select class="fs" id="abm-recurrence" onchange="abmToggleRecurrence()">
+                <option value="none">Does not repeat</option>
+                <option value="weekly">Weekly</option>
+                <option value="biweekly">Bi-weekly (every 2 weeks)</option>
+                <option value="monthly">Monthly</option>
+                <option value="custom">Custom (every N days)</option>
+              </select>
+            </div>
+            <div class="fg" id="abm-rec-every-wrap" style="margin-bottom:0;display:none">
+              <label class="fl">Every (days)</label>
+              <input type="number" class="fi" id="abm-rec-every" min="1" max="365" value="7" placeholder="e.g. 14"/>
+            </div>
+          </div>
+          <div id="abm-rec-end-wrap" style="display:none">
+            <div class="fg" style="margin-bottom:0">
+              <label class="fl">Repeat until</label>
+              <input type="date" class="fi" id="abm-rec-end"/>
+            </div>
+            <p style="font-size:11px;color:var(--muted);margin-top:5px;">Leave blank to generate 12 occurrences.</p>
+          </div>
+        </div>
       </div>
       <div id="abm-timage" class="abm-hidden">
         <div id="abm-dz" class="dz" onclick="document.getElementById('abm-file').click()" ondragover="abmDO(event)" ondragleave="abmDL()" ondrop="abmDrop(event)">
@@ -734,7 +903,7 @@ function abmRender() {
       <div class="card-body">
         <div class="date-bdg"><div class="dd">${day}</div><div class="dm">${mon}</div></div>
         <div class="card-info">
-          <div class="card-ttl">${abmEsc(ev.title)}<span class="spill spill-${abmEsc(ev.status)}">${abmEsc(ev.status)}</span></div>
+          <div class="card-ttl">${abmEsc(ev.title)}<span class="spill spill-${abmEsc(ev.status)}">${abmEsc(ev.status)}</span>${ev.recurrence && ev.recurrence !== 'none' ? '<span class="spill" style="background:#fdf6e3;color:#7a5a00;border:1px solid #e8d48a">&#x21bb; '+abmEsc(ev.recurrence)+'</span>' : ''}${ev.parent_event_id ? '<span class="spill" style="background:#f0f0f0;color:#666">series</span>' : ''}</div>
           <div class="card-meta">
             ${t ? `<span>🕐 ${abmEsc(t)}${et ? ' – ' + abmEsc(et) : ''}</span>` : ''}
             ${ev.location ? `<span>📍 ${abmEsc(ev.location)}</span>` : ''}
@@ -745,6 +914,7 @@ function abmRender() {
         <div class="card-acts">
           <button class="abmbtn abmbtn-s abmbtn-sm" onclick="abmOpenEdit(${ev.id})">Edit</button>
           <button class="abmbtn abmbtn-d abmbtn-sm" onclick="abmOpenDel(${ev.id})">Delete</button>
+          ${ev.recurrence && ev.recurrence !== 'none' ? '<button class="abmbtn abmbtn-sm" style="background:#fff8ec;color:#92400E;border:1px solid #fcd34d;font-size:11px" onclick="abmDelSeries('+ev.id+')">Del series</button>' : ''}
         </div>
       </div>
     </div>`;
@@ -764,7 +934,10 @@ function abmGetForm() {
     status: document.getElementById('abm-stat').value,
     description: document.getElementById('abm-desc').value.trim(),
     image_url: window._abmImgUrl || '',
-    image_id: window._abmImgId || ''
+    image_id: window._abmImgId || '',
+    recurrence: document.getElementById('abm-recurrence')?.value || 'none',
+    recurrence_every: document.getElementById('abm-rec-every')?.value || '',
+    recurrence_end: document.getElementById('abm-rec-end')?.value || ''
   };
 }
 
@@ -786,6 +959,9 @@ function abmClearForm() {
   document.getElementById('abm-cat').value = '';
   document.getElementById('abm-stat').value = 'publish';
   document.getElementById('abm-ai').value = '';
+  if(ev.recurrence){document.getElementById('abm-recurrence').value=ev.recurrence;abmToggleRecurrence();}
+  if(ev.recurrence_every){document.getElementById('abm-rec-every').value=ev.recurrence_every;}
+  if(ev.recurrence_end){document.getElementById('abm-rec-end').value=ev.recurrence_end.split(' ')[0];}
   abmClearImg();
 }
 
@@ -938,6 +1114,16 @@ async function abmSave() {
 }
 
 // ── Delete event ──────────────────────────────────────────────────────────
+async function abmDelSeries(id) {
+  if (!confirm('Delete ALL events in this series? This cannot be undone.')) return;
+  try {
+    const res = await abmPost('abm_delete_series', { parent_id: id });
+    if (!res.success) throw new Error(res.data);
+    abmToast('Series deleted (' + (res.data?.deleted_count || '?') + ' events) ✓');
+    await abmLoadEvents();
+  } catch(e) { abmToast('Delete series failed: ' + e.message, 'err'); }
+}
+
 async function abmConfirmDel() {
   try {
     const res = await abmPost('abm_delete_event', { id: abmDelId });
@@ -949,6 +1135,14 @@ async function abmConfirmDel() {
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────
+function abmToggleRecurrence() {
+  const val = document.getElementById('abm-recurrence').value;
+  const everyWrap = document.getElementById('abm-rec-every-wrap');
+  const endWrap   = document.getElementById('abm-rec-end-wrap');
+  everyWrap.style.display = val === 'custom' ? '' : 'none';
+  endWrap.style.display   = val !== 'none' ? '' : 'none';
+}
+
 function abmToast(msg, type = 'ok') {
   const el = document.getElementById('abm-toast');
   el.textContent = (type === 'ok' ? '✓' : type === 'warn' ? '⚠' : '✕') + ' ' + msg;
